@@ -1,0 +1,993 @@
+import sys
+import random
+import json
+import datetime
+from pathlib import Path
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                               QLabel, QPushButton, QSpinBox, QMessageBox, QTabWidget, 
+                               QProgressBar, QGroupBox, QComboBox, QCheckBox)
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QRect, QDate
+from PySide6.QtGui import QFont, QPixmap, QColor, QGuiApplication, QIcon
+import pyqtgraph as pg
+import pygame
+from collections import deque
+
+
+class CasinoGame(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Lucky Casino Deluxe")
+        self.resize(1000, 750)
+
+        # Центрирование окна
+        screen = QGuiApplication.primaryScreen().geometry()
+        x = (screen.width() - self.width()) // 2
+        y = (screen.height() - self.height()) // 2
+        self.move(x, y)
+
+        # Инициализация звуков
+        pygame.mixer.init()
+        try:
+            self.spin_sound = pygame.mixer.Sound("spin.wav")
+            self.win_sound = pygame.mixer.Sound("win.wav")
+            self.lose_sound = pygame.mixer.Sound("lose.wav")
+            self.jackpot_sound = pygame.mixer.Sound("jackpot.wav")
+        except:
+            class DummySound:
+                def play(self): pass
+
+            self.spin_sound = self.win_sound = self.lose_sound = self.jackpot_sound = DummySound()
+
+        # Игровые переменные
+        self.balance = 1000
+        self.current_bet = 10
+        self.last_win = 0
+        self.game_active = False
+        self.slot_results = [0, 0, 0]
+        self.history = []
+        self.balance_history = [self.balance]
+        
+        # Система уровней
+        self.level = 1
+        self.exp = 0
+        self.exp_to_next_level = 100
+        
+        # Достижения
+        self.achievements = {
+            "first_win": False,
+            "big_win": False,
+            "jackpot": False,
+            "high_roller": False,
+            "veteran": False
+        }
+        
+        # Статистика
+        self.stats = {
+            "total_spins": 0,
+            "total_wins": 0,
+            "total_losses": 0,
+            "max_win": 0,
+            "total_won": 0,
+            "total_lost": 0
+        }
+        
+        # Ежедневные бонусы
+        self.last_bonus_date = None
+        self.bonus_streak = 0
+        
+        # Настройки
+        self.settings = {
+            "sound": True,
+            "music": True,
+            "theme": "light",
+            "animations": True
+        }
+        
+        # Загрузка сохранений
+        self.load_game()
+
+        # Основной интерфейс
+        self.setup_ui()
+
+        # Таймер для анимации
+        self.spin_timer = QTimer()
+        self.spin_timer.timeout.connect(self.update_slot_animation)
+        self.spin_counter = 0
+        self.spin_duration = 30
+        
+        # Анимационные переменные
+        self.slot_animation_values = [0, 0, 0]
+        self.win_animation_value = 0
+        
+        # Проверка ежедневного бонуса
+        self.check_daily_bonus()
+
+    def setup_ui(self):
+        # Главный виджет
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+
+        # Основной макет
+        main_layout = QHBoxLayout(central_widget)
+
+        # Левая панель (управление)
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_panel.setFixedWidth(300)
+
+        # Правая панель (игровое поле)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+
+        main_layout.addWidget(left_panel)
+        main_layout.addWidget(right_panel)
+
+        # Настройка левой панели
+        self.setup_left_panel(left_layout)
+
+        # Настройка правой панели
+        self.setup_right_panel(right_layout)
+
+        # Стилизация
+        self.apply_theme()
+
+    def setup_left_panel(self, layout):
+        # Логотип
+        logo = QLabel("LUCKY CASINO DELUXE")
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setFont(QFont("Arial", 18, QFont.Bold))
+        layout.addWidget(logo)
+
+        # Информация об игроке
+        player_group = QGroupBox("Игрок")
+        player_layout = QVBoxLayout()
+        
+        # Уровень и прогресс
+        self.level_label = QLabel(f"Уровень: {self.level}")
+        self.level_label.setFont(QFont("Arial", 12))
+        player_layout.addWidget(self.level_label)
+        
+        self.exp_bar = QProgressBar()
+        self.exp_bar.setRange(0, self.exp_to_next_level)
+        self.exp_bar.setValue(self.exp)
+        self.exp_bar.setFormat("Опыт: %v/%m")
+        player_layout.addWidget(self.exp_bar)
+        
+        # Баланс
+        self.balance_label = QLabel(f"Баланс: ${self.balance:,}")
+        self.balance_label.setFont(QFont("Arial", 14, QFont.Bold))
+        player_layout.addWidget(self.balance_label)
+
+        # Последний выигрыш
+        self.last_win_label = QLabel(f"Последний выигрыш: ${self.last_win:,}")
+        self.last_win_label.setFont(QFont("Arial", 12))
+        player_layout.addWidget(self.last_win_label)
+        
+        player_group.setLayout(player_layout)
+        layout.addWidget(player_group)
+
+        layout.addSpacing(10)
+
+        # Ставка
+        bet_group = QGroupBox("Ставка")
+        bet_layout = QVBoxLayout()
+        
+        bet_label = QLabel("Размер ставки:")
+        bet_label.setFont(QFont("Arial", 12))
+        bet_layout.addWidget(bet_label)
+
+        self.bet_spinbox = QSpinBox()
+        self.bet_spinbox.setRange(1, min(10000, self.balance))
+        self.bet_spinbox.setValue(self.current_bet)
+        self.bet_spinbox.setSingleStep(10)
+        self.bet_spinbox.valueChanged.connect(self.update_bet)
+        bet_layout.addWidget(self.bet_spinbox)
+
+        # Кнопки быстрой ставки
+        bet_buttons = QHBoxLayout()
+        for amount in [10, 50, 100, "Max"]:
+            btn = QPushButton(str(amount))
+            if amount == "Max":
+                btn.clicked.connect(lambda: self.set_bet(self.balance))
+            else:
+                btn.clicked.connect(lambda _, amt=amount: self.set_bet(amt))
+            bet_buttons.addWidget(btn)
+        bet_layout.addLayout(bet_buttons)
+        
+        bet_group.setLayout(bet_layout)
+        layout.addWidget(bet_group)
+
+        # Кнопка Spin
+        self.spin_button = QPushButton("SPIN!")
+        self.spin_button.setFont(QFont("Arial", 16, QFont.Bold))
+        self.spin_button.clicked.connect(self.start_spin)
+        layout.addWidget(self.spin_button)
+
+        layout.addSpacing(10)
+
+        # История
+        history_group = QGroupBox("История игр")
+        history_layout = QVBoxLayout()
+        
+        self.history_display = QLabel("")
+        self.history_display.setFont(QFont("Arial", 10))
+        self.history_display.setAlignment(Qt.AlignTop)
+        history_layout.addWidget(self.history_display)
+        
+        history_group.setLayout(history_layout)
+        layout.addWidget(history_group)
+
+        # Кнопки управления
+        buttons_layout = QHBoxLayout()
+        
+        reset_btn = QPushButton("Сброс")
+        reset_btn.clicked.connect(self.reset_game)
+        buttons_layout.addWidget(reset_btn)
+        
+        save_btn = QPushButton("Сохранить")
+        save_btn.clicked.connect(self.save_game)
+        buttons_layout.addWidget(save_btn)
+        
+        settings_btn = QPushButton("Настройки")
+        settings_btn.clicked.connect(self.show_settings)
+        buttons_layout.addWidget(settings_btn)
+        
+        layout.addLayout(buttons_layout)
+
+        layout.addStretch()
+
+    def setup_right_panel(self, layout):
+        # Вкладки
+        tabs = QTabWidget()
+        
+        # Вкладка слотов
+        slot_tab = QWidget()
+        slot_layout = QVBoxLayout()
+        
+        # Слоты
+        slots_layout = QHBoxLayout()
+        self.slot_labels = []
+
+        for i in range(3):
+            slot = QLabel()
+            slot.setAlignment(Qt.AlignCenter)
+            slot.setFixedSize(180, 180)
+            self.slot_labels.append(slot)
+            slots_layout.addWidget(slot)
+
+        slot_layout.addLayout(slots_layout)
+        
+        # Анимация выигрыша
+        self.win_animation = QLabel("")
+        self.win_animation.setAlignment(Qt.AlignCenter)
+        self.win_animation.setFont(QFont("Arial", 24, QFont.Bold))
+        self.win_animation.hide()
+        slot_layout.addWidget(self.win_animation)
+        
+        # График статистики
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setBackground('#f0f0f0')
+        self.plot_widget.setTitle("История баланса", color="#333")
+        self.plot_widget.setLabel('left', "Баланс")
+        self.plot_widget.setLabel('bottom', "Игры")
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_line = self.plot_widget.plot(self.balance_history, pen=pg.mkPen(color='blue', width=2))
+        slot_layout.addWidget(self.plot_widget)
+        
+        slot_tab.setLayout(slot_layout)
+        tabs.addTab(slot_tab, "Слоты")
+        
+        # Вкладка статистики
+        stats_tab = QWidget()
+        stats_layout = QVBoxLayout()
+        
+        stats_group = QGroupBox("Статистика")
+        stats_inner_layout = QVBoxLayout()
+        
+        self.stats_labels = {
+            "total_spins": QLabel(f"Всего спинов: {self.stats['total_spins']}"),
+            "total_wins": QLabel(f"Побед: {self.stats['total_wins']}"),
+            "total_losses": QLabel(f"Поражений: {self.stats['total_losses']}"),
+            "win_rate": QLabel(f"Процент побед: {self.calculate_win_rate():.1f}%"),
+            "max_win": QLabel(f"Макс. выигрыш: ${self.stats['max_win']:,}"),
+            "total_won": QLabel(f"Всего выиграно: ${self.stats['total_won']:,}"),
+            "total_lost": QLabel(f"Всего проиграно: ${self.stats['total_lost']:,}")
+        }
+        
+        for label in self.stats_labels.values():
+            label.setFont(QFont("Arial", 12))
+            stats_inner_layout.addWidget(label)
+        
+        stats_group.setLayout(stats_inner_layout)
+        stats_layout.addWidget(stats_group)
+        
+        # Достижения
+        achievements_group = QGroupBox("Достижения")
+        achievements_layout = QVBoxLayout()
+        
+        self.achievement_labels = {
+            "first_win": QLabel("Первая победа: ❌"),
+            "big_win": QLabel("Большой выигрыш (500+): ❌"),
+            "jackpot": QLabel("Джекпот (777): ❌"),
+            "high_roller": QLabel("Высокая ставка (1000+): ❌"),
+            "veteran": QLabel("Ветеран (100 спинов): ❌")
+        }
+        
+        for label in self.achievement_labels.values():
+            label.setFont(QFont("Arial", 10))
+            achievements_layout.addWidget(label)
+        
+        achievements_group.setLayout(achievements_layout)
+        stats_layout.addWidget(achievements_group)
+        
+        stats_tab.setLayout(stats_layout)
+        tabs.addTab(stats_tab, "Статистика")
+        
+        # Вкладка мини-игр
+        minigame_tab = QWidget()
+        minigame_layout = QVBoxLayout()
+        
+        minigame_label = QLabel("Мини-игры (скоро!)")
+        minigame_label.setAlignment(Qt.AlignCenter)
+        minigame_layout.addWidget(minigame_label)
+        
+        minigame_tab.setLayout(minigame_layout)
+        tabs.addTab(minigame_tab, "Мини-игры")
+        
+        layout.addWidget(tabs)
+        
+        self.update_slot_display()
+        self.update_achievements_display()
+
+    def apply_theme(self):
+        if self.settings["theme"] == "light":
+            self.setStyleSheet("""
+                QMainWindow {
+                    background: #f5f5f5;
+                }
+                QLabel {
+                    color: #333;
+                }
+                QPushButton {
+                    background: #4CAF50;
+                    color: white;
+                    border: none;
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: #45a049;
+                }
+                QSpinBox {
+                    padding: 5px;
+                }
+                QGroupBox {
+                    border: 1px solid #ccc;
+                    border-radius: 5px;
+                    margin-top: 10px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 3px;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #ccc;
+                    background: #f0f0f0;
+                }
+                QTabBar::tab {
+                    background: #e0e0e0;
+                    padding: 5px;
+                    border: 1px solid #ccc;
+                    border-bottom: none;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+                }
+                QTabBar::tab:selected {
+                    background: #f0f0f0;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QMainWindow {
+                    background: #333;
+                }
+                QLabel {
+                    color: #eee;
+                }
+                QPushButton {
+                    background: #2E7D32;
+                    color: white;
+                    border: none;
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: #1B5E20;
+                }
+                QSpinBox {
+                    padding: 5px;
+                    background: #444;
+                    color: #eee;
+                }
+                QGroupBox {
+                    border: 1px solid #555;
+                    border-radius: 5px;
+                    margin-top: 10px;
+                    color: #eee;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 3px;
+                    color: #eee;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #555;
+                    background: #444;
+                }
+                QTabBar::tab {
+                    background: #555;
+                    color: #eee;
+                    padding: 5px;
+                    border: 1px solid #555;
+                    border-bottom: none;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+                }
+                QTabBar::tab:selected {
+                    background: #444;
+                }
+            """)
+
+        # Специальные стили
+        self.spin_button.setStyleSheet("""
+            background: #e74c3c;
+            color: white;
+            font-size: 18px;
+            padding: 15px;
+        """)
+        
+        # Обновляем стили слотов
+        for slot in self.slot_labels:
+            slot.setStyleSheet("""
+                background: #f0f0f0;
+                border: 3px solid #d0d0d0;
+                border-radius: 10px;
+                font-size: 80px;
+            """)
+
+    def set_bet(self, amount):
+        self.current_bet = min(amount, self.balance)
+        self.bet_spinbox.setValue(self.current_bet)
+
+    def update_bet(self):
+        self.current_bet = min(self.bet_spinbox.value(), self.balance)
+        self.bet_spinbox.setMaximum(self.balance)
+
+    def update_slot_display(self):
+        symbols = ["🍒", "🍋", "🍊", "🍇", "🔔", "⭐", "7"]
+        for i, label in enumerate(self.slot_labels):
+            label.setText(symbols[self.slot_results[i]])
+
+    def start_spin(self):
+        if self.game_active:
+            return
+
+        if self.balance < self.current_bet:
+            QMessageBox.warning(self, "Ошибка", "Недостаточно средств!")
+            return
+
+        self.balance -= self.current_bet
+        self.update_balance()
+
+        self.game_active = True
+        self.spin_counter = 0
+        self.spin_timer.start(50)
+        
+        if self.settings["sound"]:
+            self.spin_sound.play()
+            
+        self.spin_button.setEnabled(False)
+        
+        # Начальные значения для анимации
+        self.slot_animation_values = [0, 0, 0]
+
+    def update_slot_animation(self):
+        # Увеличиваем значения анимации для каждого слота
+        for i in range(3):
+            self.slot_animation_values[i] += random.randint(1, 3)
+            self.slot_results[i] = self.slot_animation_values[i] % 7
+        
+        self.update_slot_display()
+
+        self.spin_counter += 1
+        
+        # Замедляем анимацию ближе к концу
+        if self.spin_counter > self.spin_duration * 0.7:
+            self.spin_timer.setInterval(100)
+        elif self.spin_counter > self.spin_duration * 0.4:
+            self.spin_timer.setInterval(75)
+            
+        if self.spin_counter >= self.spin_duration:
+            self.finish_spin()
+
+    def finish_spin(self):
+        self.spin_timer.stop()
+        self.spin_timer.setInterval(50)  # Сбрасываем интервал
+        
+        self.generate_final_results()
+        win = self.check_win()
+        
+        # Обновляем баланс и статистику
+        self.balance += win
+        self.last_win = win
+        self.update_balance()
+        
+        # Обновляем статистику
+        self.stats["total_spins"] += 1
+        if win > 0:
+            self.stats["total_wins"] += 1
+            self.stats["total_won"] += win
+            if win > self.stats["max_win"]:
+                self.stats["max_win"] = win
+        else:
+            self.stats["total_losses"] += 1
+            self.stats["total_lost"] += self.current_bet
+        
+        # Добавляем в историю
+        self.add_to_history(win)
+        self.update_plot()
+        self.update_stats_display()
+        
+        # Проверяем достижения
+        self.check_achievements(win)
+        
+        # Добавляем опыт
+        self.add_experience(win)
+        
+        self.spin_button.setEnabled(True)
+        self.game_active = False
+
+        if win > 0:
+            self.show_win(win)
+            
+        # Сохраняем игру после каждого спина
+        self.save_game()
+
+    def generate_final_results(self):
+        # Вероятности
+        jackpot_chance = 0.01  # 1% на джекпот
+        big_win_chance = 0.05  # 5% на большой выигрыш
+        small_win_chance = 0.3  # 30% на маленький выигрыш
+        
+        rand = random.random()
+        
+        if rand < jackpot_chance:  # Джекпот
+            self.slot_results = [6, 6, 6]
+        elif rand < jackpot_chance + big_win_chance:  # Большой выигрыш (3 одинаковых)
+            symbol = random.randint(0, 5)  # Любой символ кроме 7
+            self.slot_results = [symbol, symbol, symbol]
+        elif rand < jackpot_chance + big_win_chance + small_win_chance:  # Маленький выигрыш (2 одинаковых)
+            symbol = random.randint(0, 5)
+            pos = random.sample([0, 1, 2], 2)
+            self.slot_results[pos[0]] = symbol
+            self.slot_results[pos[1]] = symbol
+            self.slot_results[3 - sum(pos)] = random.randint(0, 5)
+        else:  # Нет выигрыша
+            self.slot_results = [random.randint(0, 5) for _ in range(3)]
+
+    def check_win(self):
+        a, b, c = self.slot_results
+        
+        # Джекпот (три семерки)
+        if a == b == c == 6:
+            return self.current_bet * 100
+        
+        # Три одинаковых символа
+        if a == b == c:
+            return self.current_bet * 10
+        
+        # Два одинаковых символа
+        if a == b or a == c or b == c:
+            return self.current_bet * 2
+        
+        return 0
+
+    def update_balance(self):
+        self.balance_label.setText(f"Баланс: ${self.balance:,}")
+        self.last_win_label.setText(f"Последний выигрыш: ${self.last_win:,}")
+        self.bet_spinbox.setMaximum(self.balance)
+
+    def add_to_history(self, win):
+        symbols = ["🍒", "🍋", "🍊", "🍇", "🔔", "⭐", "7"]
+        combo = "".join(symbols[i] for i in self.slot_results)
+
+        if win > 0:
+            text = f"{combo} - Выигрыш ${win:,}"
+            color = "green"
+            if self.settings["sound"]:
+                if win >= self.current_bet * 100:  # Джекпот
+                    self.jackpot_sound.play()
+                else:
+                    self.win_sound.play()
+        else:
+            text = f"{combo} - Проигрыш ${self.current_bet:,}"
+            color = "red"
+            if self.settings["sound"]:
+                self.lose_sound.play()
+
+        self.history.insert(0, (text, color))
+        if len(self.history) > 10:
+            self.history = self.history[:10]
+
+        history_text = "<br>".join(f'<font color="{c}">{t}</font>' for t, c in self.history)
+        self.history_display.setText(history_text)
+
+    def update_plot(self):
+        self.balance_history.append(self.balance)
+        self.plot_line.setData(self.balance_history)
+
+    def show_win(self, amount):
+        if not self.settings["animations"]:
+            return
+            
+        self.win_animation.setText(f"ПОБЕДА! ${amount:,}")
+        self.win_animation.show()
+        self.win_animation.setStyleSheet("color: gold;")
+        
+        # Анимация увеличения
+        anim = QPropertyAnimation(self.win_animation, b"geometry")
+        anim.setDuration(1000)
+        anim.setEasingCurve(QEasingCurve.OutElastic)
+        
+        start_rect = QRect(
+            self.win_animation.x(),
+            self.win_animation.y(),
+            self.win_animation.width(),
+            self.win_animation.height()
+        )
+        
+        end_rect = QRect(
+            self.win_animation.x() - 20,
+            self.win_animation.y() - 20,
+            self.win_animation.width() + 40,
+            self.win_animation.height() + 40
+        )
+        
+        anim.setStartValue(start_rect)
+        anim.setEndValue(end_rect)
+        anim.start()
+        
+        QTimer.singleShot(3000, self.win_animation.hide)
+
+    def reset_game(self):
+        if QMessageBox.question(self, "Сброс", "Вы уверены, что хотите сбросить игру? Все прогресс будет потерян.") == QMessageBox.Yes:
+            self.balance = 1000
+            self.current_bet = 10
+            self.last_win = 0
+            self.history = []
+            self.balance_history = [self.balance]
+            
+            # Сброс статистики
+            self.stats = {
+                "total_spins": 0,
+                "total_wins": 0,
+                "total_losses": 0,
+                "max_win": 0,
+                "total_won": 0,
+                "total_lost": 0
+            }
+            
+            # Сброс уровней
+            self.level = 1
+            self.exp = 0
+            self.exp_to_next_level = 100
+            
+            # Сброс достижений
+            self.achievements = {
+                "first_win": False,
+                "big_win": False,
+                "jackpot": False,
+                "high_roller": False,
+                "veteran": False
+            }
+            
+            self.bet_spinbox.setValue(10)
+            self.update_balance()
+            self.history_display.setText("")
+            self.plot_line.setData(self.balance_history)
+            self.update_stats_display()
+            self.update_achievements_display()
+            
+            self.slot_results = [0, 0, 0]
+            self.update_slot_display()
+            
+            # Сохраняем сброшенное состояние
+            self.save_game()
+
+    def calculate_win_rate(self):
+        if self.stats["total_spins"] == 0:
+            return 0
+        return (self.stats["total_wins"] / self.stats["total_spins"]) * 100
+
+    def update_stats_display(self):
+        self.stats_labels["total_spins"].setText(f"Всего спинов: {self.stats['total_spins']}")
+        self.stats_labels["total_wins"].setText(f"Побед: {self.stats['total_wins']}")
+        self.stats_labels["total_losses"].setText(f"Поражений: {self.stats['total_losses']}")
+        self.stats_labels["win_rate"].setText(f"Процент побед: {self.calculate_win_rate():.1f}%")
+        self.stats_labels["max_win"].setText(f"Макс. выигрыш: ${self.stats['max_win']:,}")
+        self.stats_labels["total_won"].setText(f"Всего выиграно: ${self.stats['total_won']:,}")
+        self.stats_labels["total_lost"].setText(f"Всего проиграно: ${self.stats['total_lost']:,}")
+
+    def check_achievements(self, win):
+        # Первая победа
+        if not self.achievements["first_win"] and win > 0:
+            self.achievements["first_win"] = True
+            self.show_achievement("Первая победа!")
+            
+        # Большой выигрыш
+        if not self.achievements["big_win"] and win >= 500:
+            self.achievements["big_win"] = True
+            self.show_achievement("Большой выигрыш!")
+            
+        # Джекпот
+        if not self.achievements["jackpot"] and win >= self.current_bet * 100:
+            self.achievements["jackpot"] = True
+            self.show_achievement("Джекпот!!!")
+            
+        # Высокая ставка
+        if not self.achievements["high_roller"] and self.current_bet >= 1000:
+            self.achievements["high_roller"] = True
+            self.show_achievement("Высокая ставка!")
+            
+        # Ветеран
+        if not self.achievements["veteran"] and self.stats["total_spins"] >= 100:
+            self.achievements["veteran"] = True
+            self.show_achievement("Ветеран казино!")
+            
+        self.update_achievements_display()
+
+    def update_achievements_display(self):
+        self.achievement_labels["first_win"].setText(
+            "Первая победа: ✅" if self.achievements["first_win"] else "Первая победа: ❌"
+        )
+        self.achievement_labels["big_win"].setText(
+            "Большой выигрыш (500+): ✅" if self.achievements["big_win"] else "Большой выигрыш (500+): ❌"
+        )
+        self.achievement_labels["jackpot"].setText(
+            "Джекпот (777): ✅" if self.achievements["jackpot"] else "Джекпот (777): ❌"
+        )
+        self.achievement_labels["high_roller"].setText(
+            "Высокая ставка (1000+): ✅" if self.achievements["high_roller"] else "Высокая ставка (1000+): ❌"
+        )
+        self.achievement_labels["veteran"].setText(
+            "Ветеран (100 спинов): ✅" if self.achievements["veteran"] else "Ветеран (100 спинов): ❌"
+        )
+
+    def show_achievement(self, text):
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Information)
+        msg.setText("Достижение разблокировано!")
+        msg.setInformativeText(text)
+        msg.setWindowTitle("Поздравляем!")
+        msg.exec_()
+
+    def add_experience(self, win):
+        # Базовый опыт за спин
+        base_exp = 5
+        
+        # Дополнительный опыт за выигрыш
+        if win > 0:
+            base_exp += win // 10
+            
+        self.exp += base_exp
+        
+        # Проверка уровня
+        if self.exp >= self.exp_to_next_level:
+            self.level_up()
+            
+        self.update_level_display()
+
+    def level_up(self):
+        self.level += 1
+        self.exp -= self.exp_to_next_level
+        self.exp_to_next_level = int(self.exp_to_next_level * 1.5)
+        
+        # Бонус за уровень
+        bonus = self.level * 50
+        self.balance += bonus
+        
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Information)
+        msg.setText(f"Поздравляем! Вы достигли {self.level} уровня!")
+        msg.setInformativeText(f"Вы получили бонус: ${bonus:,}")
+        msg.setWindowTitle("Новый уровень!")
+        msg.exec_()
+        
+        self.update_balance()
+        
+        # Если после повышения уровня осталось достаточно опыта для следующего уровня
+        if self.exp >= self.exp_to_next_level:
+            self.level_up()
+
+    def update_level_display(self):
+        self.level_label.setText(f"Уровень: {self.level}")
+        self.exp_bar.setMaximum(self.exp_to_next_level)
+        self.exp_bar.setValue(self.exp)
+
+    def check_daily_bonus(self):
+        today = QDate.currentDate().toString("yyyy-MM-dd")
+        
+        if self.last_bonus_date == today:
+            return
+            
+        # Если бонус уже получали сегодня, не даем еще раз
+        if self.last_bonus_date is None or self.last_bonus_date != today:
+            # Увеличиваем серию, если бонус получали вчера
+            if self.last_bonus_date == QDate.currentDate().addDays(-1).toString("yyyy-MM-dd"):
+                self.bonus_streak += 1
+            else:
+                self.bonus_streak = 1
+                
+            # Вычисляем бонус
+            bonus = 100 + (self.bonus_streak - 1) * 50
+            self.balance += bonus
+            self.last_bonus_date = today
+            
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Information)
+            msg.setText("Ежедневный бонус!")
+            msg.setInformativeText(f"Вы получили ${bonus:,} за {self.bonus_streak} день подряд!")
+            msg.setWindowTitle("Бонус!")
+            msg.exec_()
+            
+            self.update_balance()
+            self.save_game()
+
+    def show_settings(self):
+        settings_dialog = QWidget()
+        settings_dialog.setWindowTitle("Настройки")
+        settings_dialog.setFixedSize(400, 300)
+        
+        layout = QVBoxLayout()
+        
+        # Настройка звуков
+        sound_group = QGroupBox("Звуки")
+        sound_layout = QVBoxLayout()
+        
+        sound_check = QCheckBox("Включить звуки")
+        sound_check.setChecked(self.settings["sound"])
+        sound_check.stateChanged.connect(lambda state: self.toggle_setting("sound", state))
+        
+        music_check = QCheckBox("Включить музыку")
+        music_check.setChecked(self.settings["music"])
+        music_check.stateChanged.connect(lambda state: self.toggle_setting("music", state))
+        
+        sound_layout.addWidget(sound_check)
+        sound_layout.addWidget(music_check)
+        sound_group.setLayout(sound_layout)
+        layout.addWidget(sound_group)
+        
+        # Настройка темы
+        theme_group = QGroupBox("Тема оформления")
+        theme_layout = QVBoxLayout()
+        
+        theme_combo = QComboBox()
+        theme_combo.addItems(["Светлая", "Темная"])
+        theme_combo.setCurrentIndex(0 if self.settings["theme"] == "light" else 1)
+        theme_combo.currentIndexChanged.connect(self.change_theme)
+        
+        theme_layout.addWidget(theme_combo)
+        theme_group.setLayout(theme_layout)
+        layout.addWidget(theme_group)
+        
+        # Настройка анимаций
+        anim_group = QGroupBox("Анимации")
+        anim_layout = QVBoxLayout()
+        
+        anim_check = QCheckBox("Включить анимации")
+        anim_check.setChecked(self.settings["animations"])
+        anim_check.stateChanged.connect(lambda state: self.toggle_setting("animations", state))
+        
+        anim_layout.addWidget(anim_check)
+        anim_group.setLayout(anim_layout)
+        layout.addWidget(anim_group)
+        
+        # Кнопка закрытия
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(settings_dialog.close)
+        layout.addWidget(close_btn)
+        
+        settings_dialog.setLayout(layout)
+        settings_dialog.exec_()
+
+    def toggle_setting(self, setting, state):
+        self.settings[setting] = state == Qt.Checked
+        self.save_game()
+
+    def change_theme(self, index):
+        self.settings["theme"] = "light" if index == 0 else "dark"
+        self.apply_theme()
+        self.save_game()
+
+    def save_game(self):
+        save_data = {
+            "balance": self.balance,
+            "level": self.level,
+            "exp": self.exp,
+            "exp_to_next_level": self.exp_to_next_level,
+            "stats": self.stats,
+            "achievements": self.achievements,
+            "last_bonus_date": self.last_bonus_date,
+            "bonus_streak": self.bonus_streak,
+            "settings": self.settings,
+            "balance_history": self.balance_history[-100:],  # Сохраняем последние 100 значений
+            "history": self.history
+        }
+        
+        try:
+            with open("casino_save.json", "w") as f:
+                json.dump(save_data, f)
+        except Exception as e:
+            print(f"Ошибка сохранения: {e}")
+
+    def load_game(self):
+        save_file = Path("casino_save.json")
+        if not save_file.exists():
+            return
+            
+        try:
+            with open("casino_save.json", "r") as f:
+                save_data = json.load(f)
+                
+            self.balance = save_data.get("balance", 1000)
+            self.level = save_data.get("level", 1)
+            self.exp = save_data.get("exp", 0)
+            self.exp_to_next_level = save_data.get("exp_to_next_level", 100)
+            self.stats = save_data.get("stats", {
+                "total_spins": 0,
+                "total_wins": 0,
+                "total_losses": 0,
+                "max_win": 0,
+                "total_won": 0,
+                "total_lost": 0
+            })
+            self.achievements = save_data.get("achievements", {
+                "first_win": False,
+                "big_win": False,
+                "jackpot": False,
+                "high_roller": False,
+                "veteran": False
+            })
+            self.last_bonus_date = save_data.get("last_bonus_date")
+            self.bonus_streak = save_data.get("bonus_streak", 0)
+            self.settings = save_data.get("settings", {
+                "sound": True,
+                "music": True,
+                "theme": "light",
+                "animations": True
+            })
+            self.balance_history = save_data.get("balance_history", [self.balance])
+            self.history = save_data.get("history", [])
+            
+        except Exception as e:
+            print(f"Ошибка загрузки: {e}")
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    
+    # Устанавливаем иконку приложения
+    try:
+        app.setWindowIcon(QIcon("casino_icon.png"))
+    except:
+        pass
+
+    game = CasinoGame()
+    game.show()
+
+    sys.exit(app.exec_())
